@@ -6,7 +6,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -33,21 +33,64 @@ jobs:
             echo "Detected Native Android"
           else
             echo "type=unknown" >> $GITHUB_OUTPUT
-            echo "No buildable project found"
             exit 1
           fi
 
-      - name: Install npm dependencies
+      - name: Patch package.json with required dependencies
         if: steps.detect.outputs.type == 'rn'
         run: |
-          npm install --legacy-peer-deps --no-audit --no-fund || npm install --no-audit --no-fund
+          node << 'NODE'
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.dependencies = pkg.dependencies || {};
+          const needed = [
+            'expo-image-picker',
+            'expo-media-library',
+            'expo-file-system',
+            'expo-print',
+            'expo-sharing',
+            'react-native-safe-area-context'
+          ];
+          for (const name of needed) {
+            if (!pkg.dependencies[name]) {
+              pkg.dependencies[name] = '*';
+              console.log('Added: ' + name);
+            }
+          }
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          NODE
 
-      - name: Install required Expo modules
+      - name: Install dependencies
         if: steps.detect.outputs.type == 'rn'
         run: |
-          npx expo install expo-image-picker expo-media-library expo-file-system expo-print expo-sharing --legacy-peer-deps 2>&1 | tail -60 || true
+          npm install --legacy-peer-deps --no-audit --no-fund
+          npx expo install --fix --legacy-peer-deps || true
+          npm install --legacy-peer-deps --no-audit --no-fund
 
-      - name: Ensure app.json has plugins and permissions
+      - name: Verify required modules are installed
+        if: steps.detect.outputs.type == 'rn'
+        run: |
+          MISSING=0
+          for m in expo-image-picker expo-media-library expo-file-system expo-print expo-sharing react-native-safe-area-context; do
+            if [ ! -d "node_modules/$m" ]; then
+              echo "!! MISSING: $m"
+              MISSING=1
+            else
+              echo "OK: $m"
+            fi
+          done
+          if [ "$MISSING" = "1" ]; then
+            echo "Installing missing modules manually..."
+            npm install expo-image-picker expo-media-library expo-file-system expo-print expo-sharing react-native-safe-area-context --legacy-peer-deps --no-audit --no-fund
+            for m in expo-image-picker expo-media-library expo-file-system expo-print expo-sharing; do
+              if [ ! -d "node_modules/$m" ]; then
+                echo "FATAL: $m still missing after manual install"
+                exit 1
+              fi
+            done
+          fi
+
+      - name: Update app.json with plugins and permissions
         if: steps.detect.outputs.type == 'rn'
         run: |
           node << 'NODE'
@@ -88,13 +131,13 @@ jobs:
       - name: Run expo prebuild
         if: steps.detect.outputs.type == 'rn'
         run: |
-          npx expo prebuild --platform android --clean --no-install
+          npx expo prebuild --platform android --no-install
           if [ ! -d "android" ]; then
-            echo "ERROR: android folder was not generated"
+            echo "ERROR: android folder not generated"
             exit 1
           fi
 
-      - name: Patch AndroidManifest.xml with permissions
+      - name: Patch AndroidManifest with permissions
         if: steps.detect.outputs.type == 'rn'
         run: |
           python3 << 'PYEOF'
@@ -114,20 +157,26 @@ jobs:
           ]
           missing = [p for p in perms if p not in content]
           if missing:
-              perm_xml = '\n    '.join(f'<uses-permission android:name="{p}" />' for p in missing)
+              perm_xml = '\n    '.join('<uses-permission android:name="' + p + '" />' for p in missing)
               content = content.replace('<application', perm_xml + '\n    <application', 1)
               with open(path, 'w') as f:
                   f.write(content)
-              print(f'Added permissions: {missing}')
+              print('Added permissions')
           else:
-              print('All permissions already present')
+              print('All permissions present')
           PYEOF
 
-      - name: Create debug keystore for signing
+      - name: Create debug keystore
         if: steps.detect.outputs.type == 'rn'
         run: |
           if [ ! -f "android/app/debug.keystore" ]; then
-            keytool -genkeypair -v               -storetype PKCS12               -keystore android/app/debug.keystore               -alias androiddebugkey               -keyalg RSA -keysize 2048 -validity 10000               -storepass android -keypass android               -dname "CN=Android Debug,O=Android,C=US"
+            keytool -genkeypair -v \
+              -storetype PKCS12 \
+              -keystore android/app/debug.keystore \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
 
       - name: Build React Native Release APK
