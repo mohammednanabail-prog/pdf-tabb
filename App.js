@@ -2,11 +2,10 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   StyleSheet, Text, View, TouchableOpacity, ScrollView, Image,
   TextInput, Modal, ActivityIndicator, Alert, StatusBar,
-  Dimensions, Animated, Platform, Share, Linking,
+  Dimensions, Animated, Platform,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 
@@ -18,10 +17,7 @@ const C = {
   cyan: '#00d4ff',
   cyan2: '#22d3ee',
   purple: '#a855f7',
-  purple2: '#8b5cf6',
   pink: '#ec4899',
-  green: '#10b981',
-  red: '#ef4444',
   text: '#f8fafc',
   muted: '#94a3b8',
 };
@@ -33,8 +29,8 @@ export default function App() {
   const [quality, setQuality] = useState('عالية');
   const [isGenerating, setIsGenerating] = useState(false);
   const [showResult, setShowResult] = useState(false);
-  const [resultBlob, setResultBlob] = useState(null);
   const [resultUri, setResultUri] = useState(null);
+  const [resultName, setResultName] = useState('');
   const [resultSize, setResultSize] = useState(0);
 
   const fadeIn = useRef(new Animated.Value(0)).current;
@@ -55,14 +51,13 @@ export default function App() {
     ).start();
   }, []);
 
-  /* ========== فتح الاستوديو مباشرة بدون حوار ========== */
   const openGallery = async () => {
     try {
       let perm = await ImagePicker.getMediaLibraryPermissionsAsync();
       if (!perm.granted) {
         perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
         if (!perm.granted) {
-          Alert.alert('الإذن مرفوض', 'نحتاج إذن الوصول للصور لاختيارها.');
+          Alert.alert('الإذن مرفوض', 'نحتاج إذن الوصول للصور.');
           return;
         }
       }
@@ -88,7 +83,6 @@ export default function App() {
     }
   };
 
-  /* ========== الكاميرا ========== */
   const openCamera = async () => {
     try {
       let perm = await ImagePicker.getCameraPermissionsAsync();
@@ -150,7 +144,6 @@ export default function App() {
     ]);
   };
 
-  /* ========== إنشاء PDF صحيح ========== */
   const generatePdf = async () => {
     if (images.length === 0) {
       Alert.alert('تنبيه', 'أضف صورة واحدة على الأقل.');
@@ -160,29 +153,24 @@ export default function App() {
     try {
       const pageFormat = pageSize === 'A4' ? 'A4' : pageSize === 'Letter' ? 'letter' : 'A4';
 
-      // نستخدم base64 دائماً — هذا هو الحل لمشكلة الصفحات البيضاء
       const pagesHtml = [];
       for (const img of images) {
-        let b64 = img.base64;
-        // في حال لم يكن base64 متوفراً (نادر)، نقرأه من الملف
-        if (!b64) {
-          try {
-            b64 = await FileSystem.readAsStringAsync(img.uri, {
-              encoding: FileSystem.EncodingType.Base64,
-            });
-          } catch (e) {
-            console.warn('تخطي صورة:', e.message);
-            continue;
-          }
+        if (!img.base64) {
+          console.warn('تخطي صورة بدون base64');
+          continue;
         }
         const mime = img.mime || 'image/jpeg';
         const rot = img.rotation || 0;
         pagesHtml.push(`
           <div class="page">
-            <img src="data:${mime};base64,${b64}"
+            <img src="data:${mime};base64,${img.base64}"
                  style="transform: rotate(${rot}deg);" />
           </div>
         `);
+      }
+
+      if (pagesHtml.length === 0) {
+        throw new Error('لا توجد صور صالحة');
       }
 
       const html = `
@@ -218,28 +206,19 @@ export default function App() {
 
       const { uri } = await Print.printToFileAsync({ html, base64: false });
 
-      // نُعيد التسمية
+      // نستخدم الملف مباشرة بدون إعادة تسمية
       const safeName = (fileName || 'document')
         .replace(/\.pdf$/i, '')
         .replace(/[^a-zA-Z0-9_\u0600-\u06FF\-]/g, '_')
         .substring(0, 60) || 'document';
-      const targetUri = FileSystem.cacheDirectory + safeName + '.pdf';
 
-      try {
-        const info = await FileSystem.getInfoAsync(targetUri);
-        if (info.exists) await FileSystem.deleteAsync(targetUri, { idempotent: true });
-      } catch (e) { /* تجاهل */ }
-
-      await FileSystem.moveAsync({ from: uri, to: targetUri });
-
-      const info = await FileSystem.getInfoAsync(targetUri);
-      setResultSize(info.size || 0);
-      setResultUri(targetUri);
-      setResultBlob(safeName + '.pdf');
+      setResultUri(uri);
+      setResultName(safeName + '.pdf');
+      setResultSize(0);
       setShowResult(true);
     } catch (err) {
       console.error(err);
-      Alert.alert('خطأ في إنشاء PDF', err.message);
+      Alert.alert('خطأ في إنشاء PDF', err.message || 'حدث خطأ غير متوقع');
     } finally {
       setIsGenerating(false);
     }
@@ -252,6 +231,7 @@ export default function App() {
         await Sharing.shareAsync(resultUri, {
           mimeType: 'application/pdf',
           dialogTitle: 'مشاركة ملف PDF',
+          UTI: 'com.adobe.pdf',
         });
       } else {
         Alert.alert('تنبيه', 'المشاركة غير متاحة على هذا الجهاز.');
@@ -261,18 +241,10 @@ export default function App() {
     }
   };
 
-  const formatSize = (bytes) => {
-    if (!bytes) return '';
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
-  };
-
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" backgroundColor="#050816" />
 
-      {/* خلفية الأورورا */}
       <View style={styles.auroraBg} pointerEvents="none">
         <View style={[styles.glowOrb, styles.glowCyan]} />
         <View style={[styles.glowOrb, styles.glowPurple]} />
@@ -284,7 +256,6 @@ export default function App() {
         showsVerticalScrollIndicator={false}
         style={{ flex: 1 }}>
 
-        {/* ============ HEADER ============ */}
         <Animated.View style={[
           styles.header,
           { opacity: fadeIn, transform: [{ translateY: slideUp }] },
@@ -302,7 +273,6 @@ export default function App() {
           </View>
         </Animated.View>
 
-        {/* ============ HERO ============ */}
         <Animated.View style={[
           styles.heroWrap,
           { opacity: fadeIn, transform: [{ translateY: slideUp }] },
@@ -315,13 +285,10 @@ export default function App() {
               <Text style={{ fontSize: 28 }}>🖼️</Text>
             </Animated.View>
             <Text style={styles.heroArrow}>➜</Text>
-            <Animated.View style={[
-              styles.heroCardFront,
-              { transform: [{ rotate: '8deg' }] },
-            ]}>
+            <View style={[styles.heroCardFront, { transform: [{ rotate: '8deg' }] }]}>
               <Text style={{ fontSize: 32 }}>📑</Text>
               <Text style={styles.pdfTag}>PDF</Text>
-            </Animated.View>
+            </View>
           </View>
 
           <View style={styles.heroTaglineWrap}>
@@ -336,11 +303,10 @@ export default function App() {
           </Text>
 
           <Text style={styles.heroSub}>
-            أضف وثائقك، انسخها، رتّبها، وحوّلها إلى PDF بجودة عالية — كل المعالجة داخل جهازك.
+            أضف وثائقك، رتّبها، وحوّلها إلى PDF بجودة عالية — كل المعالجة داخل جهازك.
           </Text>
         </Animated.View>
 
-        {/* ============ FEATURES ============ */}
         <View style={styles.featuresGrid}>
           {[
             { icon: '♾️', title: 'عدد غير محدود', desc: 'من الصور بملف واحد' },
@@ -358,7 +324,6 @@ export default function App() {
           ))}
         </View>
 
-        {/* ============ UPLOAD ============ */}
         <TouchableOpacity
           style={styles.uploadCard}
           onPress={openGallery}
@@ -382,7 +347,6 @@ export default function App() {
           <Text style={styles.cameraBtnText}>التقاط صورة بالكاميرا</Text>
         </TouchableOpacity>
 
-        {/* ============ CONTROLS ============ */}
         <View style={styles.card}>
           <Text style={styles.labelSmall}>✏️ اسم الملف النهائي</Text>
           <View style={styles.inputWrap}>
@@ -432,7 +396,6 @@ export default function App() {
           </View>
         </View>
 
-        {/* ============ IMAGES GRID ============ */}
         {images.length > 0 && (
           <View style={styles.gridSection}>
             <View style={styles.gridHeader}>
@@ -492,7 +455,6 @@ export default function App() {
           </View>
         )}
 
-        {/* ============ CONVERT BUTTON ============ */}
         <TouchableOpacity
           style={[styles.convertBtn, (images.length === 0 || isGenerating) && styles.convertBtnOff]}
           onPress={generatePdf}
@@ -517,7 +479,6 @@ export default function App() {
           </LinearGradient>
         </TouchableOpacity>
 
-        {/* ============ FOOTER ============ */}
         <View style={styles.footer}>
           <Text style={styles.footerLabel}>تطوير</Text>
           <Text style={styles.footerName}>محمد نبيل السحيقي</Text>
@@ -528,7 +489,6 @@ export default function App() {
         <View style={{ height: 40 }} />
       </ScrollView>
 
-      {/* ============ RESULT MODAL ============ */}
       <Modal
         visible={showResult}
         transparent
@@ -539,12 +499,12 @@ export default function App() {
             <Text style={styles.modalEmoji}>🎉</Text>
             <Text style={styles.modalTitle}>تم إنشاء PDF بنجاح!</Text>
             <Text style={styles.modalDesc}>
-              الملف: {resultBlob}
-              {'\n'}الحجم: {formatSize(resultSize)}
+              الملف: {resultName}
+              {'\n'}عدد الصفحات: {images.length}
             </Text>
 
             <TouchableOpacity style={styles.modalPrimaryBtn} onPress={shareResult}>
-              <Text style={styles.modalPrimaryBtnText}>📤 مشاركة الملف</Text>
+              <Text style={styles.modalPrimaryBtnText}>📤 مشاركة / حفظ الملف</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -582,13 +542,10 @@ const styles = StyleSheet.create({
 
   scroll: { paddingHorizontal: 16, paddingTop: Platform.OS === 'android' ? 50 : 30 },
 
-  /* Header */
   header: { flexDirection: 'row-reverse', alignItems: 'center', gap: 12, marginBottom: 26 },
   logoBox: {
     width: 48, height: 48, borderRadius: 14,
     alignItems: 'center', justifyContent: 'center',
-    shadowColor: C.cyan, shadowOpacity: 0.5, shadowRadius: 14,
-    shadowOffset: { width: 0, height: 6 }, elevation: 10,
   },
   logoIcon: { fontSize: 22 },
   logoText: { flex: 1 },
@@ -598,7 +555,6 @@ const styles = StyleSheet.create({
   },
   brandSub: { color: C.muted, fontSize: 12, textAlign: 'right' },
 
-  /* Hero */
   heroWrap: { alignItems: 'center', marginBottom: 28 },
   heroCanvas: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
@@ -609,14 +565,12 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(15,23,42,0.9)',
     borderWidth: 1.5, borderColor: 'rgba(0,212,255,0.5)',
     alignItems: 'center', justifyContent: 'center',
-    shadowColor: C.cyan, shadowOpacity: 0.3, shadowRadius: 12, elevation: 6,
   },
   heroArrow: { color: C.cyan, fontSize: 22, fontWeight: 'bold' },
   heroCardFront: {
     width: 82, height: 92, borderRadius: 18,
     backgroundColor: '#e11d48',
     alignItems: 'center', justifyContent: 'center',
-    shadowColor: C.pink, shadowOpacity: 0.5, shadowRadius: 16, elevation: 8,
   },
   pdfTag: { color: '#fff', fontSize: 10, fontWeight: '900', marginTop: 2 },
   heroTaglineWrap: {
@@ -637,7 +591,6 @@ const styles = StyleSheet.create({
     lineHeight: 22, paddingHorizontal: 12,
   },
 
-  /* Features */
   featuresGrid: {
     flexDirection: 'row', flexWrap: 'wrap',
     gap: 10, marginBottom: 24,
@@ -657,7 +610,6 @@ const styles = StyleSheet.create({
   featureTitle: { color: '#fff', fontSize: 13, fontWeight: '800', marginBottom: 3 },
   featureDesc: { color: C.muted, fontSize: 11, textAlign: 'center' },
 
-  /* Upload */
   uploadCard: {
     backgroundColor: 'rgba(15,23,42,0.55)',
     borderRadius: 22, paddingVertical: 34, paddingHorizontal: 18,
@@ -685,7 +637,6 @@ const styles = StyleSheet.create({
   },
   cameraBtnText: { color: '#c084fc', fontSize: 14, fontWeight: '700' },
 
-  /* Card */
   card: {
     backgroundColor: 'rgba(15,23,42,0.75)',
     borderWidth: 1, borderColor: 'rgba(0,212,255,0.22)',
@@ -718,7 +669,6 @@ const styles = StyleSheet.create({
   pillText: { color: C.muted, fontSize: 12, fontWeight: '700' },
   pillTextActive: { color: C.cyan },
 
-  /* Grid */
   gridSection: { marginBottom: 20 },
   gridHeader: {
     flexDirection: 'row-reverse', justifyContent: 'space-between',
@@ -776,7 +726,6 @@ const styles = StyleSheet.create({
   navBtnText: { color: C.cyan, fontSize: 18, fontWeight: '900' },
   imgNavLabel: { color: C.muted, fontSize: 11, fontWeight: '700' },
 
-  /* Convert */
   convertBtn: { borderRadius: 16, overflow: 'hidden', marginBottom: 20 },
   convertBtnOff: { opacity: 0.7 },
   convertBtnInner: {
@@ -785,7 +734,6 @@ const styles = StyleSheet.create({
   },
   convertBtnText: { color: '#fff', fontSize: 16, fontWeight: '900' },
 
-  /* Footer */
   footer: { alignItems: 'center', paddingVertical: 30 },
   footerLabel: {
     color: '#64748b', fontSize: 11, letterSpacing: 5,
@@ -795,7 +743,6 @@ const styles = StyleSheet.create({
   footerEn: { color: C.muted, fontSize: 12, letterSpacing: 2, marginTop: 4 },
   footerLove: { color: '#64748b', fontSize: 12, marginTop: 12 },
 
-  /* Modal */
   modalOverlay: {
     flex: 1, backgroundColor: 'rgba(0,0,0,0.9)',
     alignItems: 'center', justifyContent: 'center', padding: 22,
