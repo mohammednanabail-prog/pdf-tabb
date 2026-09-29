@@ -22,152 +22,15 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Detect project type
-        id: detect
-        run: |
-          if [ -f "package.json" ] && grep -qE '"(expo|react-native)"' package.json; then
-            echo "type=rn" >> $GITHUB_OUTPUT
-            echo "Detected React Native / Expo"
-          elif [ -n "$(find . -name gradlew -not -path '*/node_modules/*' -print -quit)" ]; then
-            echo "type=native" >> $GITHUB_OUTPUT
-            echo "Detected Native Android"
-          else
-            echo "type=unknown" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-
-      - name: Patch package.json with required dependencies
-        if: steps.detect.outputs.type == 'rn'
-        run: |
-          node << 'NODE'
-          const fs = require('fs');
-          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-          pkg.dependencies = pkg.dependencies || {};
-          const needed = [
-            'expo-image-picker',
-            'expo-media-library',
-            'expo-file-system',
-            'expo-print',
-            'expo-sharing',
-            'react-native-safe-area-context'
-          ];
-          for (const name of needed) {
-            if (!pkg.dependencies[name]) {
-              pkg.dependencies[name] = '*';
-              console.log('Added: ' + name);
-            }
-          }
-          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
-          NODE
-
       - name: Install dependencies
-        if: steps.detect.outputs.type == 'rn'
         run: |
           npm install --legacy-peer-deps --no-audit --no-fund
-          npx expo install --fix --legacy-peer-deps || true
-          npm install --legacy-peer-deps --no-audit --no-fund
-
-      - name: Verify required modules are installed
-        if: steps.detect.outputs.type == 'rn'
-        run: |
-          MISSING=0
-          for m in expo-image-picker expo-media-library expo-file-system expo-print expo-sharing react-native-safe-area-context; do
-            if [ ! -d "node_modules/$m" ]; then
-              echo "!! MISSING: $m"
-              MISSING=1
-            else
-              echo "OK: $m"
-            fi
-          done
-          if [ "$MISSING" = "1" ]; then
-            echo "Installing missing modules manually..."
-            npm install expo-image-picker expo-media-library expo-file-system expo-print expo-sharing react-native-safe-area-context --legacy-peer-deps --no-audit --no-fund
-            for m in expo-image-picker expo-media-library expo-file-system expo-print expo-sharing; do
-              if [ ! -d "node_modules/$m" ]; then
-                echo "FATAL: $m still missing after manual install"
-                exit 1
-              fi
-            done
-          fi
-
-      - name: Update app.json with plugins and permissions
-        if: steps.detect.outputs.type == 'rn'
-        run: |
-          node << 'NODE'
-          const fs = require('fs');
-          let cfg = {};
-          if (fs.existsSync('app.json')) {
-            try { cfg = JSON.parse(fs.readFileSync('app.json', 'utf8')); } catch(e) { cfg = {}; }
-          }
-          cfg.expo = cfg.expo || {};
-          cfg.expo.name = cfg.expo.name || 'My App';
-          cfg.expo.slug = cfg.expo.slug || 'my-app';
-          cfg.expo.version = cfg.expo.version || '1.0.0';
-          cfg.expo.orientation = cfg.expo.orientation || 'portrait';
-          cfg.expo.userInterfaceStyle = cfg.expo.userInterfaceStyle || 'automatic';
-          cfg.expo.android = cfg.expo.android || {};
-          cfg.expo.android.package = cfg.expo.android.package || 'com.myapp.app';
-          cfg.expo.android.versionCode = cfg.expo.android.versionCode || 1;
-
-          const perms = ['READ_EXTERNAL_STORAGE','WRITE_EXTERNAL_STORAGE','READ_MEDIA_IMAGES','READ_MEDIA_VIDEO','CAMERA','INTERNET'];
-          cfg.expo.android.permissions = cfg.expo.android.permissions || [];
-          perms.forEach(p => {
-            if (!cfg.expo.android.permissions.includes(p)) cfg.expo.android.permissions.push(p);
-          });
-
-          cfg.expo.plugins = cfg.expo.plugins || [];
-          const names = cfg.expo.plugins.map(p => Array.isArray(p) ? p[0] : p);
-          if (!names.includes('expo-image-picker')) {
-            cfg.expo.plugins.push(['expo-image-picker', { photosPermission: 'التطبيق يحتاج الوصول إلى صورك' }]);
-          }
-          if (!names.includes('expo-media-library')) {
-            cfg.expo.plugins.push(['expo-media-library', { photosPermission: 'التطبيق يحتاج حفظ الملفات', savePhotosPermission: 'التطبيق يحتاج حفظ ملفات' }]);
-          }
-
-          fs.writeFileSync('app.json', JSON.stringify(cfg, null, 2));
-          console.log('app.json ready');
-          NODE
+          npx expo install expo-image-picker expo-print expo-sharing -- --legacy-peer-deps
 
       - name: Run expo prebuild
-        if: steps.detect.outputs.type == 'rn'
-        run: |
-          npx expo prebuild --platform android --no-install
-          if [ ! -d "android" ]; then
-            echo "ERROR: android folder not generated"
-            exit 1
-          fi
-
-      - name: Patch AndroidManifest with permissions
-        if: steps.detect.outputs.type == 'rn'
-        run: |
-          python3 << 'PYEOF'
-          import os
-          path = 'android/app/src/main/AndroidManifest.xml'
-          if not os.path.exists(path):
-              print('Manifest not found')
-              exit(0)
-          with open(path, 'r') as f:
-              content = f.read()
-          perms = [
-              'android.permission.READ_EXTERNAL_STORAGE',
-              'android.permission.WRITE_EXTERNAL_STORAGE',
-              'android.permission.READ_MEDIA_IMAGES',
-              'android.permission.READ_MEDIA_VIDEO',
-              'android.permission.CAMERA',
-          ]
-          missing = [p for p in perms if p not in content]
-          if missing:
-              perm_xml = '\n    '.join('<uses-permission android:name="' + p + '" />' for p in missing)
-              content = content.replace('<application', perm_xml + '\n    <application', 1)
-              with open(path, 'w') as f:
-                  f.write(content)
-              print('Added permissions')
-          else:
-              print('All permissions present')
-          PYEOF
+        run: npx expo prebuild --platform android --no-install
 
       - name: Create debug keystore
-        if: steps.detect.outputs.type == 'rn'
         run: |
           if [ ! -f "android/app/debug.keystore" ]; then
             keytool -genkeypair -v \
@@ -179,21 +42,11 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Build React Native Release APK
-        if: steps.detect.outputs.type == 'rn'
+      - name: Build Release APK
         run: |
           cd android
           chmod +x gradlew
           ./gradlew assembleRelease --stacktrace --no-daemon
-
-      - name: Build Native Android Debug APK
-        if: steps.detect.outputs.type == 'native'
-        run: |
-          GRADLEW_PATH=$(find . -name "gradlew" -not -path '*/node_modules/*' | head -n 1)
-          DIR=$(dirname "$GRADLEW_PATH")
-          cd "$DIR"
-          chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace --no-daemon
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -203,7 +56,7 @@ jobs:
           path: '**/build/outputs/apk/**/*.apk'
           if-no-files-found: warn
 
-      - name: Create Release and Upload APK
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         if: success()
         with:
