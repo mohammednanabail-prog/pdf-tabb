@@ -25,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           npm install --legacy-peer-deps --no-audit --no-fund
-          npx expo install expo-image-picker expo-print expo-sharing -- --legacy-peer-deps
+          npx expo install expo-image-picker expo-print expo-sharing expo-linear-gradient expo-file-system -- --legacy-peer-deps
 
       - name: Run expo prebuild
         run: npx expo prebuild --platform android --no-install
