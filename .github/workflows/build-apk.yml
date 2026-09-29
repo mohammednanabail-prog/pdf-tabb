@@ -1,0 +1,167 @@
+name: Build Android APK
+on: [push, workflow_dispatch]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Detect project type
+        id: detect
+        run: |
+          if [ -f "package.json" ] && grep -qE '"(expo|react-native)"' package.json; then
+            echo "type=rn" >> $GITHUB_OUTPUT
+            echo "Detected React Native / Expo"
+          elif [ -n "$(find . -name gradlew -not -path '*/node_modules/*' -print -quit)" ]; then
+            echo "type=native" >> $GITHUB_OUTPUT
+            echo "Detected Native Android"
+          else
+            echo "type=unknown" >> $GITHUB_OUTPUT
+            echo "No buildable project found"
+            exit 1
+          fi
+
+      - name: Install npm dependencies
+        if: steps.detect.outputs.type == 'rn'
+        run: |
+          npm install --legacy-peer-deps --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: Install required Expo modules
+        if: steps.detect.outputs.type == 'rn'
+        run: |
+          npx expo install expo-image-picker expo-media-library expo-file-system expo-print expo-sharing --legacy-peer-deps 2>&1 | tail -60 || true
+
+      - name: Ensure app.json has plugins and permissions
+        if: steps.detect.outputs.type == 'rn'
+        run: |
+          node << 'NODE'
+          const fs = require('fs');
+          let cfg = {};
+          if (fs.existsSync('app.json')) {
+            try { cfg = JSON.parse(fs.readFileSync('app.json', 'utf8')); } catch(e) { cfg = {}; }
+          }
+          cfg.expo = cfg.expo || {};
+          cfg.expo.name = cfg.expo.name || 'My App';
+          cfg.expo.slug = cfg.expo.slug || 'my-app';
+          cfg.expo.version = cfg.expo.version || '1.0.0';
+          cfg.expo.orientation = cfg.expo.orientation || 'portrait';
+          cfg.expo.userInterfaceStyle = cfg.expo.userInterfaceStyle || 'automatic';
+          cfg.expo.android = cfg.expo.android || {};
+          cfg.expo.android.package = cfg.expo.android.package || 'com.myapp.app';
+          cfg.expo.android.versionCode = cfg.expo.android.versionCode || 1;
+
+          const perms = ['READ_EXTERNAL_STORAGE','WRITE_EXTERNAL_STORAGE','READ_MEDIA_IMAGES','READ_MEDIA_VIDEO','CAMERA','INTERNET'];
+          cfg.expo.android.permissions = cfg.expo.android.permissions || [];
+          perms.forEach(p => {
+            if (!cfg.expo.android.permissions.includes(p)) cfg.expo.android.permissions.push(p);
+          });
+
+          cfg.expo.plugins = cfg.expo.plugins || [];
+          const names = cfg.expo.plugins.map(p => Array.isArray(p) ? p[0] : p);
+          if (!names.includes('expo-image-picker')) {
+            cfg.expo.plugins.push(['expo-image-picker', { photosPermission: 'التطبيق يحتاج الوصول إلى صورك' }]);
+          }
+          if (!names.includes('expo-media-library')) {
+            cfg.expo.plugins.push(['expo-media-library', { photosPermission: 'التطبيق يحتاج حفظ الملفات', savePhotosPermission: 'التطبيق يحتاج حفظ ملفات' }]);
+          }
+
+          fs.writeFileSync('app.json', JSON.stringify(cfg, null, 2));
+          console.log('app.json ready');
+          NODE
+
+      - name: Run expo prebuild
+        if: steps.detect.outputs.type == 'rn'
+        run: |
+          npx expo prebuild --platform android --clean --no-install
+          if [ ! -d "android" ]; then
+            echo "ERROR: android folder was not generated"
+            exit 1
+          fi
+
+      - name: Patch AndroidManifest.xml with permissions
+        if: steps.detect.outputs.type == 'rn'
+        run: |
+          python3 << 'PYEOF'
+          import os
+          path = 'android/app/src/main/AndroidManifest.xml'
+          if not os.path.exists(path):
+              print('Manifest not found')
+              exit(0)
+          with open(path, 'r') as f:
+              content = f.read()
+          perms = [
+              'android.permission.READ_EXTERNAL_STORAGE',
+              'android.permission.WRITE_EXTERNAL_STORAGE',
+              'android.permission.READ_MEDIA_IMAGES',
+              'android.permission.READ_MEDIA_VIDEO',
+              'android.permission.CAMERA',
+          ]
+          missing = [p for p in perms if p not in content]
+          if missing:
+              perm_xml = '\n    '.join(f'<uses-permission android:name="{p}" />' for p in missing)
+              content = content.replace('<application', perm_xml + '\n    <application', 1)
+              with open(path, 'w') as f:
+                  f.write(content)
+              print(f'Added permissions: {missing}')
+          else:
+              print('All permissions already present')
+          PYEOF
+
+      - name: Create debug keystore for signing
+        if: steps.detect.outputs.type == 'rn'
+        run: |
+          if [ ! -f "android/app/debug.keystore" ]; then
+            keytool -genkeypair -v               -storetype PKCS12               -keystore android/app/debug.keystore               -alias androiddebugkey               -keyalg RSA -keysize 2048 -validity 10000               -storepass android -keypass android               -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Build React Native Release APK
+        if: steps.detect.outputs.type == 'rn'
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --stacktrace --no-daemon
+
+      - name: Build Native Android Debug APK
+        if: steps.detect.outputs.type == 'native'
+        run: |
+          GRADLEW_PATH=$(find . -name "gradlew" -not -path '*/node_modules/*' | head -n 1)
+          DIR=$(dirname "$GRADLEW_PATH")
+          cd "$DIR"
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: app-apk
+          path: '**/build/outputs/apk/**/*.apk'
+          if-no-files-found: warn
+
+      - name: Create Release and Upload APK
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: 'APK Build #${{ github.run_number }}'
+          files: '**/build/outputs/apk/**/*.apk'
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
