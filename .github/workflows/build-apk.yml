@@ -25,10 +25,25 @@ jobs:
       - name: Install dependencies
         run: |
           npm install --legacy-peer-deps --no-audit --no-fund
-          npx expo install expo-image-picker expo-print expo-sharing expo-linear-gradient expo-file-system -- --legacy-peer-deps
+          npx expo install expo-image-picker expo-print expo-sharing expo-linear-gradient expo-document-picker -- --legacy-peer-deps
+          npm install react-native-draggable-flatlist react-native-gesture-handler react-native-reanimated jszip --legacy-peer-deps --no-audit --no-fund
+
+      - name: Ensure babel config
+        run: |
+          if [ ! -f "babel.config.js" ]; then
+            cat > babel.config.js << 'EOF'
+          module.exports = function(api) {
+            api.cache(true);
+            return {
+              presets: ['babel-preset-expo'],
+              plugins: ['react-native-reanimated/plugin'],
+            };
+          };
+          EOF
+          fi
 
       - name: Run expo prebuild
-        run: npx expo prebuild --platform android --no-install
+        run: npx expo prebuild --platform android --no-install --clean
 
       - name: Create debug keystore
         run: |
